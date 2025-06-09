@@ -159,13 +159,13 @@ void servidor() {
 
             sem_post(sem_server_ready);
 
-            while (!juego->juego_terminado) {
+            while (juego->partida_en_curso) {
                 sem_wait(sem_client_ready);
                 actualizar_oculta(juego->frase_secreta, juego->frase_oculta, juego->letra, &juego->acierto);
 
                 if (!juego->acierto) juego->intentos_restantes--;
                 if (strcmp(juego->frase_oculta, juego->frase_secreta) == 0 || juego->intentos_restantes <= 0) {
-                    juego->juego_terminado = 1;
+                    juego->partida_en_curso = 0;
                     juego->tiempo_fin = time(NULL);
                     if (strcmp(juego->frase_oculta, juego->frase_secreta) == 0) {
                         juego->resultado = 1;
@@ -180,7 +180,6 @@ void servidor() {
             }
 
             printf("Partida finalizada con %s\n", juego->nickname);
-            juego->partida_en_curso = 0;
         } else {
             juego->juego_terminado = 1;
             if (ranking_count > 0) {

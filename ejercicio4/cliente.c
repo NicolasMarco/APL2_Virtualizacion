@@ -38,9 +38,21 @@ sem_t* sem_server_ready;
 char nickname[50];
 
 void signal_handler(int sig) {
-    if (sig == SIGINT) {
-        printf("\nSIGINT ignorado.\n");
-    }
+    
+}
+
+void sigterm_handler(int sig) {
+    printf("\nRecibido SIGTERM. Cerrando limpiamente...\n");
+    juego->letra = '*';
+    sem_post(sem_client_ready);
+
+    // Limpiar recursos
+    munmap(juego, sizeof(Juego));
+    close(shm_fd);
+    sem_close(sem_client_ready);
+    sem_close(sem_server_ready);
+
+    exit(0);
 }
 
 void mostrar_ayuda() {
@@ -51,6 +63,7 @@ void mostrar_ayuda() {
 
 int main(int argc, char* argv[]) {
     signal(SIGINT, signal_handler);
+    signal(SIGTERM, sigterm_handler);
 
     int opt;
     int flag_n = 0, flag_h = 0;
@@ -126,13 +139,11 @@ int main(int argc, char* argv[]) {
     // Verificar si hay una partida en curso
     if (juego->juego_terminado) {
         printf("No hay un servidor disponible para jugar.\n");
-        sem_post(sem_server_ready);  // Libera al servidor si estaba esperando
         return 1;
     }
 
     if (juego->partida_en_curso) {
         printf("Ya hay una partida en curso. Intente más tarde.\n");
-        sem_post(sem_server_ready);  // Libera al servidor si estaba esperando
         return 1;
     }
 
@@ -143,35 +154,41 @@ int main(int argc, char* argv[]) {
     sem_post(sem_client_ready);
 
     while (1) {
-        printf("Esperando servidor...\n");
-        sem_wait(sem_server_ready);
-        printf("Servidor respondio...\n");
+        if (juego->juego_terminado == -1) {
+            printf("El servidor interrumpio el juego\n");
+            break;
+        } else {
+            printf("Esperando servidor...\n");
+            sem_wait(sem_server_ready);
+            printf("Servidor respondio...\n");
 
-        if (juego->intentos_restantes == 0 || strcmp(juego->frase_secreta, juego->frase_oculta) == 0) {
-            //juego->tiempo_fin = time(NULL);
+            if (juego->intentos_restantes == 0 || strcmp(juego->frase_secreta, juego->frase_oculta) == 0) {
+                //juego->tiempo_fin = time(NULL);
 
-            if (strcmp(juego->frase_secreta, juego->frase_oculta) == 0) {
-                printf("¡Ganaste! Frase: %s\n", juego->frase_secreta);
-            } else {
-                printf("Perdiste. Frase: %s\n", juego->frase_secreta);
+                if (strcmp(juego->frase_secreta, juego->frase_oculta) == 0) {
+                    printf("¡Ganaste! Frase: %s\n", juego->frase_secreta);
+                } else {
+                    printf("Perdiste. Frase: %s\n", juego->frase_secreta);
+                }
+
+                //juego->resultado = (strcmp(juego->frase_secreta, juego->frase_oculta) == 0);
+                //juego->partida_en_curso = 0;
+
+                //sem_post(sem_client_ready);  // Notificar al servidor que cliente terminó
+                break;
             }
 
-            //juego->resultado = (strcmp(juego->frase_secreta, juego->frase_oculta) == 0);
-            //juego->partida_en_curso = 0;
+            printf("Frase: %s\n", juego->frase_oculta);
+            printf("Intentos restantes: %d\n", juego->intentos_restantes);
+            printf("Ingrese una letra: ");
+            char letra;
+            scanf(" %c", &letra);
 
-            //sem_post(sem_client_ready);  // Notificar al servidor que cliente terminó
-            break;
+            juego->letra = letra;
+
+            sem_post(sem_client_ready);  // Notifica al servidor que envió letra
         }
-
-        printf("Frase: %s\n", juego->frase_oculta);
-        printf("Intentos restantes: %d\n", juego->intentos_restantes);
-        printf("Ingrese una letra: ");
-        char letra;
-        scanf(" %c", &letra);
-
-        juego->letra = letra;
-
-        sem_post(sem_client_ready);  // Notifica al servidor que envió letra
+        
     }
 
     // Limpiar recursos

@@ -38,6 +38,7 @@ typedef struct {
     double tiempo;
 } Ranking;
 
+
 Juego *juego;
 Ranking ranking[MAX_PLAYERS];
 int ranking_count = 0;
@@ -46,6 +47,7 @@ char frases[100][MAX_LEN];
 int total_frases = 0;
 char archivo_frases[MAX_LEN];
 int terminarServidor = 0;
+
 
 sem_t *sem_client_ready, *sem_server_ready;
 int shm_fd;
@@ -69,14 +71,19 @@ void ocultar_frase(const char *frase, char *oculta) {
     oculta[strlen(frase)] = 0;
 }
 
-void actualizar_oculta(const char *frase, char *oculta, char letra, int *acierto) {
-    *acierto = 0;
-    for (int i = 0; frase[i]; i++) {
-        if (frase[i] == letra && oculta[i] == '_') {
-            oculta[i] = letra;
-            *acierto = 1;
+int actualizar_oculta(const char *frase, char *oculta, char letra, int *acierto) {
+    if (letra == '*') {
+        return 1;
+    } else {
+        *acierto = 0;
+        for (int i = 0; frase[i]; i++) {
+            if (frase[i] == letra && oculta[i] == '_') {
+                oculta[i] = letra;
+                *acierto = 1;
+            }
         }
     }
+    return 0;
 }
 
 void manejar_SIGUSR1(int sig) {
@@ -102,17 +109,12 @@ void manejar_SIGUSR2(int sig) {
     juego->juego_terminado = 1;
     if (juego->partida_en_curso) {
         printf("\nSIGUSR2 recibido. Finalizando partida y cerrando.\n");
-        if (ranking_count > 0) {
-            printf("\nRanking final:\n");
-            for (int i = 0; i < ranking_count; i++) {
-                printf("%s - %.2f segundos\n", ranking[i].nickname, ranking[i].tiempo);
-            }
-        } else {
-            printf("\nNingun participante logro acertar la frase\n");
-        }
+        juego->juego_terminado = -1;
     } else {
         printf("\nSIGUSR2 recibido. Cerrando servidor.\n");
-        if (ranking_count > 0) {
+    }
+
+    if (ranking_count > 0) {
             printf("\nRanking final:\n");
             for (int i = 0; i < ranking_count; i++) {
                 printf("%s - %.2f segundos\n", ranking[i].nickname, ranking[i].tiempo);
@@ -120,13 +122,22 @@ void manejar_SIGUSR2(int sig) {
         } else {
             printf("\nNingun participante logro acertar la frase\n");
         }
-    }
 
     exit(0);
 }
 
 void sigint_handler(int sig) {
     // Ignorar Ctrl+C
+}
+
+void sigterm_handler(int sig) {
+    printf("\nRecibido SIGTERM. Cerrando limpiamente...\n");
+
+    if (juego->partida_en_curso) {
+        juego->juego_terminado = -1;
+    } 
+
+    exit(0);
 }
 
 void servidor() {
@@ -143,6 +154,7 @@ void servidor() {
     sem_server_ready = sem_open(SEM_SERVER_READY, O_CREAT, 0666, 0);
     pid_t pid = getpid();
     printf("Servidor iniciado. PID: %d\n", pid);
+    
     while (1) {
         if (!terminarServidor) {
             printf("Esperando cliente...\n");
@@ -152,8 +164,8 @@ void servidor() {
             int idx = rand() % total_frases;
             strncpy(juego->frase_secreta, frases[idx], MAX_LEN);
             ocultar_frase(juego->frase_secreta, juego->frase_oculta);
-            juego->partida_en_curso = 1;
             juego->intentos_restantes = intentos_por_partida;
+            juego->partida_en_curso = 1;
             juego->juego_terminado = 0;
             juego->tiempo_inicio = time(NULL);
 
@@ -161,22 +173,24 @@ void servidor() {
 
             while (juego->partida_en_curso) {
                 sem_wait(sem_client_ready);
-                actualizar_oculta(juego->frase_secreta, juego->frase_oculta, juego->letra, &juego->acierto);
-
-                if (!juego->acierto) juego->intentos_restantes--;
-                if (strcmp(juego->frase_oculta, juego->frase_secreta) == 0 || juego->intentos_restantes <= 0) {
-                    juego->partida_en_curso = 0;
-                    juego->tiempo_fin = time(NULL);
-                    if (strcmp(juego->frase_oculta, juego->frase_secreta) == 0) {
-                        juego->resultado = 1;
-                        double duracion = difftime(juego->tiempo_fin, juego->tiempo_inicio);
-                        strcpy(ranking[ranking_count].nickname, juego->nickname);
-                        ranking[ranking_count++].tiempo = duracion;
-                    } else {
-                        juego->resultado = 0;
+                if (!actualizar_oculta(juego->frase_secreta, juego->frase_oculta, juego->letra, &juego->acierto)) {
+                    if (!juego->acierto) juego->intentos_restantes--;
+                    if (strcmp(juego->frase_oculta, juego->frase_secreta) == 0 || juego->intentos_restantes <= 0) {
+                        juego->partida_en_curso = 0;
+                        juego->tiempo_fin = time(NULL);
+                        if (strcmp(juego->frase_oculta, juego->frase_secreta) == 0) {
+                            juego->resultado = 1;
+                            double duracion = difftime(juego->tiempo_fin, juego->tiempo_inicio);
+                            strcpy(ranking[ranking_count].nickname, juego->nickname);
+                            ranking[ranking_count++].tiempo = duracion;
+                        } else {
+                            juego->resultado = 0;
+                        }
                     }
+                    sem_post(sem_server_ready);
+                } else {
+                    juego->partida_en_curso = 0;
                 }
-                sem_post(sem_server_ready);
             }
 
             printf("Partida finalizada con %s\n", juego->nickname);
@@ -204,6 +218,7 @@ int main(int argc, char *argv[]) {
     int opt;
     int flag_a = 0, flag_c = 0, flag_h = 0;
     signal(SIGINT, sigint_handler);
+    signal(SIGTERM, sigterm_handler);
     signal(SIGUSR1, manejar_SIGUSR1);
     signal(SIGUSR2, manejar_SIGUSR2);
 

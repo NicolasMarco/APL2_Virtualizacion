@@ -1,184 +1,109 @@
-// cliente.c
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <fcntl.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <semaphore.h>
 #include <signal.h>
-#include <time.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <getopt.h>
-#include <errno.h>
 
-#define MAX_LEN 256
-#define SHM_NAME "/shm_ahorcado"
-#define SEM_CLIENT_READY "/sem_client_ready"
-#define SEM_SERVER_READY "/sem_server_ready"
+#define MAX_LEN 512
 
-typedef struct {
-    char frase_secreta[MAX_LEN];
-    char frase_oculta[MAX_LEN];
-    char letra;
-    int intentos_restantes;
-    int partida_en_curso;
-    int juego_terminado;
-    int acierto;
-    int resultado; // 1 = ganó, 0 = perdió
-    char nickname[64];
-    time_t tiempo_inicio;
-    time_t tiempo_fin;
-} Juego;
+int sockfd;
 
-int shm_fd;
-Juego* juego;
-sem_t* sem_client_ready;
-sem_t* sem_server_ready;
-char nickname[50];
-
-void signal_handler(int sig) {
-    if (sig == SIGINT) {
-        printf("\nSIGINT ignorado.\n");
-    }
+void sigint_handler(int sig) {
+    printf("\nDesconectando del servidor...\n");
+    close(sockfd);
+    exit(0);
 }
 
 void mostrar_ayuda() {
-    printf("Uso: ./cliente -n <nickname>\n");
-    printf("\t-n, --nickname\tNombre del usuario (obligatorio)\n");
-    printf("\t-h, --help\t\tMuestra esta ayuda\n");
+    printf("Uso: ./cliente -n NICKNAME -p PUERTO -s SERVIDOR\n");
 }
 
-int main(int argc, char* argv[]) {
-    signal(SIGINT, signal_handler);
+int main(int argc, char *argv[]) {
+    int opt, flag_n = 0, flag_p = 0, flag_s = 0;
+    char nickname[64];
+    char servidor_ip[64];
+    int puerto;
 
-    int opt;
-    int flag_n = 0, flag_h = 0;
-    int option_index = 0;
     static struct option long_options[] = {
         {"nickname", required_argument, 0, 'n'},
-        {"help", no_argument, 0, 'h'},
+        {"puerto",   required_argument, 0, 'p'},
+        {"servidor", required_argument, 0, 's'},
+        {"help",     no_argument,       0, 'h'},
         {0, 0, 0, 0}
     };
 
-    while ((opt = getopt_long(argc, argv, "n:h", long_options, &option_index)) != -1) {
+    while ((opt = getopt_long(argc, argv, "n:p:s:h", long_options, NULL)) != -1) {
         switch (opt) {
-            case 'n':
-                strncpy(nickname, optarg, sizeof(nickname));
-                flag_n = 1;
-                break;
-            case 'h':
-                flag_h = 1;
-                break;
-            default:
-                mostrar_ayuda();
-                return 1;
+            case 'n': strncpy(nickname, optarg, sizeof(nickname)); flag_n = 1; break;
+            case 'p': puerto = atoi(optarg); flag_p = 1; break;
+            case 's': strncpy(servidor_ip, optarg, sizeof(servidor_ip)); flag_s = 1; break;
+            case 'h': mostrar_ayuda(); return 0;
+            default: mostrar_ayuda(); return 1;
         }
     }
 
-    if (flag_h) {
-        if (flag_n) {
-            fprintf(stderr, "La opción -h no puede combinarse con -n\n");
-            mostrar_ayuda();
-            return 1;
-        }
+    if (!flag_n || !flag_p || !flag_s) {
         mostrar_ayuda();
         return 1;
     }
 
-    if (!flag_n) {
-        fprintf(stderr, "Debe ingresar un nickname.\n");
-        mostrar_ayuda();
+    signal(SIGINT, sigint_handler);
+
+    sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd < 0) {
+        perror("socket");
         return 1;
     }
 
-    if (strlen(nickname) == 0) {
-        fprintf(stderr, "Nickname obligatorio. Use -n <nickname>\n");
+    struct sockaddr_in server_addr;
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_port = htons(puerto);
+    if (inet_pton(AF_INET, servidor_ip, &server_addr.sin_addr) <= 0) {
+        perror("inet_pton");
         return 1;
     }
 
-    // Abrir memoria compartida
-    shm_fd = shm_open(SHM_NAME, O_RDWR, 0666);
-    if (shm_fd == -1) {
-        perror("shm_open");
-        exit(EXIT_FAILURE);
-    }
-
-    juego = mmap(NULL, sizeof(Juego), PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
-    if (juego == MAP_FAILED) {
-        perror("mmap");
-        exit(EXIT_FAILURE);
-    }
-
-    // Abrir semáforos
-    sem_client_ready = sem_open(SEM_CLIENT_READY, 0);
-    if (sem_client_ready == SEM_FAILED) {
-        perror("sem_open client");
-        exit(EXIT_FAILURE);
-    }
-
-    sem_server_ready = sem_open(SEM_SERVER_READY, 0);
-    if (sem_server_ready == SEM_FAILED) {
-        perror("sem_open server");
-        exit(EXIT_FAILURE);
-    }
-
-    // Verificar si hay una partida en curso
-    if (juego->juego_terminado) {
-        printf("No hay un servidor disponible para jugar.\n");
-        sem_post(sem_server_ready);  // Libera al servidor si estaba esperando
+    if (connect(sockfd, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
+        perror("connect");
         return 1;
     }
 
-    if (juego->partida_en_curso) {
-        printf("Ya hay una partida en curso. Intente más tarde.\n");
-        sem_post(sem_server_ready);  // Libera al servidor si estaba esperando
+    // Enviar nickname
+    if (send(sockfd, nickname, strlen(nickname), 0) <= 0) {
+        perror("send nickname");
+        close(sockfd);
         return 1;
     }
 
-    // Configurar juego
-    strcpy(juego->nickname, nickname);
-    //juego->partida_en_curso = 1;
-    //juego->tiempo_inicio = time(NULL);
-    sem_post(sem_client_ready);
+    printf("Conectado al servidor como '%s'.\n", nickname);
+
+    char buffer[MAX_LEN];
+    char input[8]; // para letra o respuesta S/N
+    int n;
 
     while (1) {
-        printf("Esperando servidor...\n");
-        sem_wait(sem_server_ready);
-        printf("Servidor respondio...\n");
-
-        if (juego->intentos_restantes == 0 || strcmp(juego->frase_secreta, juego->frase_oculta) == 0) {
-            //juego->tiempo_fin = time(NULL);
-
-            if (strcmp(juego->frase_secreta, juego->frase_oculta) == 0) {
-                printf("¡Ganaste! Frase: %s\n", juego->frase_secreta);
-            } else {
-                printf("Perdiste. Frase: %s\n", juego->frase_secreta);
-            }
-
-            //juego->resultado = (strcmp(juego->frase_secreta, juego->frase_oculta) == 0);
-            //juego->partida_en_curso = 0;
-
-            //sem_post(sem_client_ready);  // Notificar al servidor que cliente terminó
+        memset(buffer, 0, sizeof(buffer));
+        n = recv(sockfd, buffer, sizeof(buffer) - 1, 0);
+        if (n <= 0) {
+            printf("Servidor cerrado o conexión perdida.\n");
             break;
         }
 
-        printf("Frase: %s\n", juego->frase_oculta);
-        printf("Intentos restantes: %d\n", juego->intentos_restantes);
-        printf("Ingrese una letra: ");
-        char letra;
-        scanf(" %c", &letra);
+        printf("%s", buffer);
 
-        juego->letra = letra;
-
-        sem_post(sem_client_ready);  // Notifica al servidor que envió letra
+        if (strstr(buffer, "Ingrese letra:") || strstr(buffer, "volver a jugar")) {
+            fgets(input, sizeof(input), stdin);
+            if (send(sockfd, input, 1, 0) <= 0) {
+                printf("Error enviando respuesta al servidor.\n");
+                break;
+            }
+        }
     }
 
-    // Limpiar recursos
-    munmap(juego, sizeof(Juego));
-    close(shm_fd);
-    sem_close(sem_client_ready);
-    sem_close(sem_server_ready);
-
+    close(sockfd);
     return 0;
 }

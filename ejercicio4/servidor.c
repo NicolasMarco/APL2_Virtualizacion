@@ -1,6 +1,3 @@
-// Archivos: servidor.c, cliente.c, Makefile, frases.txt
-// Este es el nuevo servidor.c con mejoras: ranking, tiempo, señales y ayuda.
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

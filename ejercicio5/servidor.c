@@ -1,6 +1,3 @@
-// Archivos: servidor.c, cliente.c, Makefile, frases.txt
-// Este es el nuevo servidor.c con mejoras: ranking, tiempo, señales y ayuda.
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -8,9 +5,12 @@
 #include <pthread.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include <time.h>
+#include <signal.h>
+#include <getopt.h>
+#include <netdb.h>
 
 #define MAX_LEN 256
+#define MAX_CLIENTES 100
 
 typedef struct {
     char frase_secreta[MAX_LEN];
@@ -38,8 +38,9 @@ int usuarios_conectados = 0;
 pthread_mutex_t mutex_clientes = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t mutex_ranking = PTHREAD_MUTEX_INITIALIZER;
 
-
+Ranking ranking[MAX_CLIENTES];
 int ranking_count = 0;
+
 char frases[100][MAX_LEN];
 int total_frases = 0;
 char archivo_frases[MAX_LEN];
@@ -74,27 +75,62 @@ void actualizar_oculta(const char *frase, char *oculta, char letra, int *acierto
     }
 }
 
+void actualizar_ranking(const char* nickname, int gano) {
+    pthread_mutex_lock(&mutex_ranking);
+    int encontrado = 0;
+    for (int i = 0; i < ranking_count; i++) {
+        if (strcmp(ranking[i].nickname, nickname) == 0) {
+            if (gano) ranking[i].aciertos++;
+            encontrado = 1;
+            break;
+        }
+    }
+    if (!encontrado) {
+        strcpy(ranking[ranking_count].nickname, nickname);
+        ranking[ranking_count].aciertos = gano ? 1 : 0;
+        ranking_count++;
+    }
+    pthread_mutex_unlock(&mutex_ranking);
+}
+
+int comparar_ranking(const void *a, const void *b) {
+    return ((Ranking*)b)->aciertos - ((Ranking*)a)->aciertos;
+}
+
+void ordenar_ranking() {
+    pthread_mutex_lock(&mutex_ranking);
+    qsort(ranking, ranking_count, sizeof(Ranking), comparar_ranking);
+    pthread_mutex_unlock(&mutex_ranking);
+}
+
 void sigint_handler(int sig) {
+    printf("\nServidor detenido. Notificando a los clientes...\n");
+
+    for (int i = 0; i < usuarios_conectados; i++) {
+        send(clientes[i].socket, "Servidor cerrado\n", 18, 0);
+        close(clientes[i].socket);
+    }
+
     if (ranking_count > 0) {
+        ordenar_ranking();
         printf("\nRanking final:\n");
         for (int i = 0; i < ranking_count; i++) {
-            printf("%s - %.2f segundos\n", ranking[i].nickname, ranking[i].tiempo);
+            printf("%s - %d aciertos\n", ranking[i].nickname, ranking[i].aciertos);
         }
     } else {
-        printf("\nNingun participante logro acertar la frase\n");
+        printf("\nNingún participante completo su turno.\n");
     }
 
     exit(0);
 }
 
-void atender_cliente(void* arg) {
+void* atender_cliente(void* arg) {
     Cliente* cliente = (Cliente*)arg;
     Juego* juego = &cliente->juego;
     char buffer[512];
     char nuevaRonda;
     int letraInvalida = 0;
 
-    // Iniciar juego
     juego->intentos_restantes = 10;
     juego->partida_en_curso = 1;
 
@@ -102,214 +138,155 @@ void atender_cliente(void* arg) {
     strncpy(juego->frase_secreta, frases[idx], MAX_LEN);
     ocultar_frase(juego->frase_secreta, juego->frase_oculta);
 
-    ranking[ranking_count].aciertos = 0;
-
     while (juego->partida_en_curso) {
-        if (!terminarServidor) {
-            // Enviar estado actual
-            snprintf(buffer, sizeof(buffer), "Frase: %s\nIntentos restantes: %d\nIngrese letra: ",
-                juego->frase_oculta, juego->intentos_restantes);
-            send(cliente->socket, buffer, strlen(buffer), 0);
+        snprintf(buffer, sizeof(buffer), "Frase: %s\nIntentos restantes: %d\nIngrese letra: ",
+                 juego->frase_oculta, juego->intentos_restantes);
+        if (send(cliente->socket, buffer, strlen(buffer), 0) <= 0) break;
 
-            // Esperar letra
-            int n = recv(cliente->socket, &juego->letra, 1, 0);
-            if (n <= 0) {
-                printf("Cliente %s desconectado.\n", juego->nickname);
-                break;
+        int n = recv(cliente->socket, &juego->letra, 1, 0);
+        if (n <= 0) break;
+
+        actualizar_oculta(juego->frase_secreta, juego->frase_oculta, juego->letra, &juego->acierto);
+        if (!juego->acierto) juego->intentos_restantes--;
+
+        if (strcmp(juego->frase_oculta, juego->frase_secreta) == 0 || juego->intentos_restantes <= 0) {
+            juego->partida_en_curso = 0;
+            if (strcmp(juego->frase_oculta, juego->frase_secreta) == 0) {
+                send(cliente->socket, "Ganaste!\n", 9, 0);
+                actualizar_ranking(juego->nickname, 1);
+            } else {
+                send(cliente->socket, "Perdiste!\n", 10, 0);
+                actualizar_ranking(juego->nickname, 0);
             }
-            
-            actualizar_oculta(juego->frase_secreta, juego->frase_oculta, juego->letra, &juego->acierto);
-            if (!juego->acierto) juego->intentos_restantes--;
-            
-            if (strcmp(juego->frase_oculta, juego->frase_secreta) == 0 || juego->intentos_restantes <= 0) {
-                juego->partida_en_curso = 0;
-                if (strcmp(juego->frase_oculta, juego->frase_secreta) == 0) {
-                    strcpy(buffer, "Ganaste!\n");
-                    send(cliente->socket, buffer, strlen(buffer), 0);
-                    pthread_mutex_lock(&mutex_ranking);
-                    strcpy(ranking[ranking_count].nickname, juego->nickname);
-                    ranking[ranking_count++].aciertos++;
-                    pthread_mutex_unlock(&mutex_ranking);
-                } else {
-                    strcpy(buffer, "Perdiste!\n");
-                    send(cliente->socket, buffer, strlen(buffer), 0);
-                    strcpy(ranking[ranking_count].nickname, juego->nickname);
-                }
 
-                do {
-                    if (!letraInvalida) {
-                        snprintf(buffer, sizeof(buffer), "\nQueres volver a jugar? S/N: ");
-                        send(cliente->socket, buffer, strlen(buffer), 0);
+            do {
+                if (!letraInvalida) {
+                    send(cliente->socket, "\n¿Querés volver a jugar? S/N: ", 32, 0);
+                    n = recv(cliente->socket, &nuevaRonda, 1, 0);
+                    if (n <= 0) break;
 
-                        // Esperar respuesta
-                        int n = recv(cliente->socket, &nuevaRonda, 1, 0);
-                        if (n <= 0) {
-                            printf("Cliente %s desconectado.\n", juego->nickname);
-                            break;
-                        } else {
-                            if (nuevaRonda == 's' || nuevaRonda == 'S') {
-                                //Inicializamos con nueva frase
-                                letraInvalida = 1;
-                                idx = rand() % total_frases;
-                                strncpy(juego->frase_secreta, frases[idx], MAX_LEN);
-                                ocultar_frase(juego->frase_secreta, juego->frase_oculta);
-                                juego->intentos_restantes = 10;
-                                juego->partida_en_curso = 1;
-                            } else if (nuevaRonda == 'n' || nuevaRonda == 'N') {
-                                snprintf(buffer, sizeof(buffer), "\nGracias por jugar! El ranking quedo asi hasta el momento:\n");
-                                send(cliente->socket, buffer, strlen(buffer), 0);
-                                for (int i = 0; i < ranking_count; i++) {
-                                    snprintf(buffer, sizeof(buffer), "%s - %d aciertos\n", ranking[i].nickname, ranking[i].aciertos);
-                                    send(cliente->socket, buffer, strlen(buffer), 0);
-                                }
-                            } else {
-                                letraInvalida = 1;
-                            }
+                    if (nuevaRonda == 's' || nuevaRonda == 'S') {
+                        idx = rand() % total_frases;
+                        strncpy(juego->frase_secreta, frases[idx], MAX_LEN);
+                        ocultar_frase(juego->frase_secreta, juego->frase_oculta);
+                        juego->intentos_restantes = 10;
+                        juego->partida_en_curso = 1;
+                    } else if (nuevaRonda == 'n' || nuevaRonda == 'N') {
+                        send(cliente->socket, "\nGracias por jugar! Ranking actual:\n", 37, 0);
+                        ordenar_ranking();
+                        for (int i = 0; i < ranking_count; i++) {
+                            snprintf(buffer, sizeof(buffer), "%s - %d aciertos\n",
+                                     ranking[i].nickname, ranking[i].aciertos);
+                            send(cliente->socket, buffer, strlen(buffer), 0);
                         }
                     } else {
-                        snprintf(buffer, sizeof(buffer), "\nLETRA INVALIDA. Queres volver a jugar? S/N: ");
-                        send(cliente->socket, buffer, strlen(buffer), 0);
-                        letraInvalida = 0;
-                    }     
-                } while (nuevaRonda != 's' && nuevaRonda != 'S' && nuevaRonda != 'n' && nuevaRonda != 'N');
-            }
-
-        } else {
-            if (ranking_count > 0) {
-                printf("\nRanking final:\n");
-                for (int i = 0; i < ranking_count; i++) {
-                    printf("%s - %d segundos\n", ranking[i].nickname, ranking[i].aciertos);
+                        letraInvalida = 1;
+                    }
+                } else {
+                    send(cliente->socket, "\nLETRA INVALIDA. Querés volver a jugar? S/N: ", 45, 0);
+                    letraInvalida = 0;
                 }
-            } else {
-                printf("\nNingun participante logro acertar la frase\n");
-            }
-            printf("Finalizando servidor \n");
-
-            //LOGICA PARA CERRAR CONEXION CON EL CLIENTE DE FORMA ARMONIOSA INFORMANDOSELO
-            pthread_exit(NULL);.
-            exit(0);
+            } while (nuevaRonda != 's' && nuevaRonda != 'S' && nuevaRonda != 'n' && nuevaRonda != 'N');
         }
     }
 
-    printf("Partida finalizada con %s\n", juego->nickname);
+    printf("Cliente %s desconectado.\n", juego->nickname);
+    close(cliente->socket);
+
+    pthread_mutex_lock(&mutex_clientes);
+    usuarios_conectados--;
+    pthread_mutex_unlock(&mutex_clientes);
+
+    free(cliente);
+    return NULL;
 }
 
 void mostrar_ayuda() {
-    printf("Uso: ./servidor -a ARCHIVO -c INTENTOS\n");
+    printf("Uso: ./servidor -a ARCHIVO -p PUERTO -u MAX_USUARIOS\n");
 }
 
 int main(int argc, char *argv[]) {
-    int opt;
-    int flag_a = 0, flag_p = 0, flag_u = 0, flag_h = 0;
-    int puerto;
-    int max_usuarios;
-    
+    int opt, puerto = 0, max_usuarios = 0;
+    int flag_a = 0, flag_p = 0, flag_u = 0;
+    int sockfd;
+
     static struct option long_options[] = {
         {"archivo",  required_argument, 0, 'a'},
-        {"puerto", required_argument, 0, 'p'},
+        {"puerto",   required_argument, 0, 'p'},
         {"usuarios", required_argument, 0, 'u'},
         {"help",     no_argument,       0, 'h'},
-        {0, 0, 0, 0} // Fin del array
+        {0, 0, 0, 0}
     };
 
-    while ((opt = getopt_long(argc, argv, "a:c:h", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "a:p:u:h", long_options, NULL)) != -1) {
         switch (opt) {
-            case 'a':
-                strncpy(archivo_frases, optarg, MAX_LEN);
-                flag_a = 1;
-                break;
-            case 'p':
-                puerto = atoi(optarg);
-                flag_p = 1;
-                break;
-            case 'u':
-                max_usuarios = atoi(optarg);
-                flag_u = 1;
-                break;
-            case 'h':
-                flag_h = 1;
-                break;
-            default:
-                mostrar_ayuda();
-                return 1;
+            case 'a': strncpy(archivo_frases, optarg, MAX_LEN); flag_a = 1; break;
+            case 'p': puerto = atoi(optarg); flag_p = 1; break;
+            case 'u': max_usuarios = atoi(optarg); flag_u = 1; break;
+            case 'h': mostrar_ayuda(); return 0;
+            default: mostrar_ayuda(); return 1;
         }
-    }
-
-    if (flag_h) {
-        if (flag_a || flag_p || flag_u) {
-            fprintf(stderr, "La opción -h no puede combinarse con -a ni -c\n");
-            mostrar_ayuda();
-            return 1;
-        }
-        mostrar_ayuda();
-        return 0;
     }
 
     if (!flag_a || !flag_p || !flag_u) {
-        fprintf(stderr, "Faltan opciones obligatorias -a, -p, -u\n");
         mostrar_ayuda();
         return 1;
     }
 
-    if (!archivo_frases[0] || intentos_por_partida <= 0) {
-        mostrar_ayuda();
-        return 1;
-    }
+    signal(SIGINT, sigint_handler);
+    cargar_frases();
 
-    Ranking ranking[max_usuarios];
+    sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd < 0) { perror("socket"); return 1; }
+
     struct sockaddr_in servidor;
     servidor.sin_family = AF_INET;
     servidor.sin_addr.s_addr = INADDR_ANY;
     servidor.sin_port = htons(puerto);
 
     if (bind(sockfd, (struct sockaddr*)&servidor, sizeof(servidor)) < 0) {
-        perror("bind");
-        return 1;
+        perror("bind"); return 1;
+    }
+
+    char hostname[128];
+    gethostname(hostname, sizeof(hostname));
+
+    struct hostent *host_entry = gethostbyname(hostname);
+    if (host_entry != NULL) {
+        char *ip = inet_ntoa(*(struct in_addr*)host_entry->h_addr_list[0]);
+        printf("Servidor escuchando en IP: %s, puerto: %d\n", ip, puerto);
     }
 
     if (listen(sockfd, max_usuarios) < 0) {
-        perror("listen");
-        return 1;
+        perror("listen"); return 1;
     }
 
-    cargar_frases();
-    printf("Servidor escuchando en puerto %d...\n", puerto);
-    
     while (1) {
         if (usuarios_conectados < max_usuarios) {
             struct sockaddr_in cliente_addr;
             socklen_t addr_len = sizeof(cliente_addr);
             int cliente_fd = accept(sockfd, (struct sockaddr*)&cliente_addr, &addr_len);
-            if (cliente_fd < 0) {
-                perror("accept");
+            if (cliente_fd < 0) continue;
+
+            Cliente* nuevo = malloc(sizeof(Cliente));
+            nuevo->socket = cliente_fd;
+
+            if (recv(cliente_fd, nuevo->juego.nickname, sizeof(nuevo->juego.nickname), 0) <= 0) {
+                close(cliente_fd);
+                free(nuevo);
                 continue;
             }
-            
+
+            printf("Cliente %s conectado.\n", nuevo->juego.nickname);
+
             pthread_mutex_lock(&mutex_clientes);
-            int idx = usuarios_conectados;
-            usuarios_conectados++;
+            clientes[usuarios_conectados++] = *nuevo;
             pthread_mutex_unlock(&mutex_clientes);
 
-            clientes[idx].socket = cliente_fd;
-
-            ssize_t bytes_recibidos = recv(cliente_fd, clientes[idx].juego.nickname,
-                                   sizeof(clientes[idx].juego.nickname), 0);
-            if (bytes_recibidos <= 0) {
-                perror("recv nickname");
-                close(cliente_fd);
-                pthread_mutex_lock(&mutex_clientes);
-                usuarios_conectados--;
-                pthread_mutex_unlock(&mutex_clientes);
-                continue;
-            }
-
-            printf("Cliente %s conectado.\n", clientes[idx].juego.nickname);
-
             pthread_t hilo;
-            pthread_create(&hilo, NULL, atender_cliente, &clientes[idx]);
+            pthread_create(&hilo, NULL, atender_cliente, nuevo);
             pthread_detach(hilo);
-        }
-        else {
+        } else {
             sleep(1);
         }
     }

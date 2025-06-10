@@ -56,9 +56,29 @@ void sigterm_handler(int sig) {
 }
 
 void mostrar_ayuda() {
-    printf("Uso: ./cliente -n <nickname>\n");
-    printf("\t-n, --nickname\tNombre del usuario (obligatorio)\n");
-    printf("\t-h, --help\t\tMuestra esta ayuda\n");
+    printf("\nUso: ./cliente -n NICKNAME\n");
+    printf("       o ./cliente --nickname NICKNAME\n");
+    printf("\n");
+    printf("Descripción:\n");
+    printf("  Este programa se conecta al servidor para participar en el juego de adivinar frases secretas.\n");
+    printf("  Solo puede haber un cliente ejecutándose a la vez para garantizar la correcta ejecución del juego.\n");
+    printf("\n");
+    printf("Características del juego:\n");
+    printf("  ✓ Solo puede haber un cliente ejecutándose a la vez.\n");
+    printf("  ✓ El servidor debe estar en ejecución antes de iniciar el cliente.\n");
+    printf("  ✓ Tanto el cliente como el servidor ignoran la señal SIGINT (Ctrl+C).\n");
+    printf("  ✓ Si el servidor se interrumpe (SIGUSR1 o SIGUSR2), el cliente finaliza .\n");
+    printf("\n");
+    printf("Parámetros:\n");
+    printf("  -n, --nickname  Nickname del usuario que participa en la partida (obligatorio).\n");
+    printf("  -h, --help      Muestra esta ayuda y termina.\n");
+    printf("\n");
+    printf("Ejemplo de uso:\n");
+    printf("  ./cliente -n MiNombre\n");
+    printf("\n");
+    printf("Sugerencias:\n");
+    printf("  - Asegúrese de que el servidor esté en ejecución antes de iniciar el cliente.\n");
+    printf("  - Utilice SIGUSR1 o SIGUSR2 para finalizar el servidor de forma segura.\n");
 }
 
 int main(int argc, char* argv[]) {
@@ -84,7 +104,6 @@ int main(int argc, char* argv[]) {
                 flag_h = 1;
                 break;
             default:
-                mostrar_ayuda();
                 return 1;
         }
     }
@@ -101,7 +120,6 @@ int main(int argc, char* argv[]) {
 
     if (!flag_n) {
         fprintf(stderr, "Debe ingresar un nickname.\n");
-        mostrar_ayuda();
         return 1;
     }
 
@@ -113,26 +131,26 @@ int main(int argc, char* argv[]) {
     // Abrir memoria compartida
     shm_fd = shm_open(SHM_NAME, O_RDWR, 0666);
     if (shm_fd == -1) {
-        perror("shm_open");
+        perror("No hay un servidor activo.");
         exit(EXIT_FAILURE);
     }
 
     juego = mmap(NULL, sizeof(Juego), PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
     if (juego == MAP_FAILED) {
-        perror("mmap");
+        perror("No hay un servidor activo.");
         exit(EXIT_FAILURE);
     }
 
     // Abrir semáforos
     sem_client_ready = sem_open(SEM_CLIENT_READY, 0);
     if (sem_client_ready == SEM_FAILED) {
-        perror("sem_open client");
+        perror("No hay un servidor activo.");
         exit(EXIT_FAILURE);
     }
 
     sem_server_ready = sem_open(SEM_SERVER_READY, 0);
     if (sem_server_ready == SEM_FAILED) {
-        perror("sem_open server");
+        perror("No hay un servidor activo.");
         exit(EXIT_FAILURE);
     }
 
@@ -149,8 +167,7 @@ int main(int argc, char* argv[]) {
 
     // Configurar juego
     strcpy(juego->nickname, nickname);
-    //juego->partida_en_curso = 1;
-    //juego->tiempo_inicio = time(NULL);
+    
     sem_post(sem_client_ready);
 
     while (1) {
@@ -160,10 +177,16 @@ int main(int argc, char* argv[]) {
         } else {
             printf("Esperando servidor...\n");
             sem_wait(sem_server_ready);
+			
+			if (juego->juego_terminado == -1) {
+				printf("El servidor interrumpio el juego\n");
+				break;
+			}
+			
             printf("Servidor respondio...\n");
 
             if (juego->intentos_restantes == 0 || strcmp(juego->frase_secreta, juego->frase_oculta) == 0) {
-                //juego->tiempo_fin = time(NULL);
+               
 
                 if (strcmp(juego->frase_secreta, juego->frase_oculta) == 0) {
                     printf("¡Ganaste! Frase: %s\n", juego->frase_secreta);
@@ -171,12 +194,11 @@ int main(int argc, char* argv[]) {
                     printf("Perdiste. Frase: %s\n", juego->frase_secreta);
                 }
 
-                //juego->resultado = (strcmp(juego->frase_secreta, juego->frase_oculta) == 0);
-                //juego->partida_en_curso = 0;
-
-                //sem_post(sem_client_ready);  // Notificar al servidor que cliente terminó
+           
                 break;
             }
+			
+			
 
             printf("Frase: %s\n", juego->frase_oculta);
             printf("Intentos restantes: %d\n", juego->intentos_restantes);

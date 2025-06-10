@@ -1,3 +1,6 @@
+// Archivos: servidor.c, cliente.c, Makefile, frases.txt
+// Este es el nuevo servidor.c con mejoras: ranking, tiempo, señales y ayuda.
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -9,7 +12,7 @@
 #include <signal.h>
 #include <time.h>
 #include <getopt.h>
-
+#include <errno.h>
 #define SHM_NAME "/shm_ahorcado"
 #define SEM_CLIENT_READY "/sem_client_ready"
 #define SEM_SERVER_READY "/sem_server_ready"
@@ -49,6 +52,37 @@ int terminarServidor = 0;
 sem_t *sem_client_ready, *sem_server_ready;
 int shm_fd;
 
+void mostrar_ayuda() {
+    printf("\nUso: ./servidor -a ARCHIVO -c CANTIDAD_INTENTOS\n");
+    printf("       o ./servidor --archivo ARCHIVO --cantidad CANTIDAD_INTENTOS\n");
+    printf("\n");
+    printf("Descripción:\n");
+    printf("  Este programa implementa un juego donde un único cliente puede conectarse al servidor\n");
+    printf("  para adivinar frases secretas dentro de un número limitado de intentos.\n");
+    printf("\n");
+    printf("Características del juego:\n");
+    printf("  ✓ Solo se permite un cliente ejecutándose a la vez.\n");
+    printf("  ✓ Solo puede haber un servidor en ejecución por computadora.\n");
+    printf("  ✓ El servidor espera que un cliente se conecte para iniciar una partida.\n");
+    printf("  ✓ Tanto el cliente como el servidor ignoran la señal SIGINT (Ctrl+C).\n");
+    printf("  ✓ El servidor finaliza al recibir SIGUSR1 si no hay partida en curso;\n");
+    printf("    de lo contrario, espera a que la partida termine para finalizar.\n");
+    printf("  ✓ El servidor finaliza inmediatamente al recibir SIGUSR2;\n");
+    printf("    si hay partida en curso, la finaliza y muestra los resultados.\n");
+    printf("\n");
+    printf("Parámetros:\n");
+    printf("  -a, --archivo   Archivo de frases secretas (obligatorio).\n");
+    printf("  -c, --cantidad  Cantidad de intentos permitidos por partida (obligatorio).\n");
+    printf("  -h, --help      Muestra esta ayuda y termina.\n");
+    printf("\n");
+    printf("Ejemplo de uso:\n");
+    printf("  ./servidor -a frases.txt -c 5\n");
+    printf("\n");
+    printf("Sugerencias:\n");
+    printf("  - Antes de ejecutar el servidor, asegúrese de no tener otra instancia activa.\n");
+    printf("  - Para terminar el servidor correctamente, use SIGUSR1 o SIGUSR2 según corresponda.\n");
+    printf("\n");
+}
 void cargar_frases() {
     FILE *file = fopen(archivo_frases, "r");
     if (!file) {
@@ -62,6 +96,41 @@ void cargar_frases() {
     fclose(file);
 }
 
+void limpiar_recursos() {
+    munmap(juego, sizeof(Juego));
+    close(shm_fd);
+    shm_unlink(SHM_NAME);
+
+    sem_close(sem_client_ready);
+    sem_close(sem_server_ready);
+    sem_unlink(SEM_CLIENT_READY);
+    sem_unlink(SEM_SERVER_READY);
+}
+
+// Función de comparación para qsort
+int comparar_por_tiempo(const void *a, const void *b) {
+    const Ranking *r1 = (const Ranking *)a;
+    const Ranking *r2 = (const Ranking *)b;
+    if (r1->tiempo < r2->tiempo) return -1;
+    if (r1->tiempo > r2->tiempo) return 1;
+    return 0;
+}
+
+void mostrar_ranking_final() {
+    if (ranking_count > 0) {
+        printf("\nRanking final:\n");
+        qsort(ranking, ranking_count, sizeof(Ranking), comparar_por_tiempo);
+    	
+		printf("%s - %.2f segundos", ranking[0].nickname, ranking[0].tiempo);
+		printf(" ***** GANADOR ***** \n");
+		
+		for (int i = 1; i < ranking_count; i++) {
+			printf("%s - %.2f segundos\n", ranking[i].nickname, ranking[i].tiempo);
+        }
+    } else {
+        printf("\nNingún participante logró acertar la frase.\n");
+    }
+}
 void ocultar_frase(const char *frase, char *oculta) {
     for (int i = 0; frase[i]; i++)
         oculta[i] = frase[i] == ' ' ? ' ' : '_';
@@ -90,14 +159,8 @@ void manejar_SIGUSR1(int sig) {
     } else {
         juego->juego_terminado = 1;
         printf("\nSIGUSR1 recibido. Cerrando servidor.\n");
-        if (ranking_count > 0) {
-            printf("\nRanking final:\n");
-            for (int i = 0; i < ranking_count; i++) {
-                printf("%s - %.2f segundos\n", ranking[i].nickname, ranking[i].tiempo);
-            }
-        } else {
-            printf("\nNingun participante logro acertar la frase\n");
-        }
+        mostrar_ranking_final();
+		limpiar_recursos();
         exit(0);
     }
 }
@@ -107,19 +170,13 @@ void manejar_SIGUSR2(int sig) {
     if (juego->partida_en_curso) {
         printf("\nSIGUSR2 recibido. Finalizando partida y cerrando.\n");
         juego->juego_terminado = -1;
+		sem_post(sem_server_ready);
     } else {
         printf("\nSIGUSR2 recibido. Cerrando servidor.\n");
     }
 
-    if (ranking_count > 0) {
-            printf("\nRanking final:\n");
-            for (int i = 0; i < ranking_count; i++) {
-                printf("%s - %.2f segundos\n", ranking[i].nickname, ranking[i].tiempo);
-            }
-        } else {
-            printf("\nNingun participante logro acertar la frase\n");
-        }
-
+    mostrar_ranking_final();
+	limpiar_recursos();
     exit(0);
 }
 
@@ -133,12 +190,22 @@ void sigterm_handler(int sig) {
     if (juego->partida_en_curso) {
         juego->juego_terminado = -1;
     } 
-
+	limpiar_recursos();
     exit(0);
 }
 
+
 void servidor() {
-    shm_fd = shm_open(SHM_NAME, O_CREAT | O_RDWR, 0666);
+    shm_fd = shm_open(SHM_NAME, O_CREAT | O_EXCL | O_RDWR, 0666);
+	if (shm_fd == -1) {
+		if (errno == EEXIST) {
+			fprintf(stderr, "Ya hay un servidor activo.\n");
+		} else {
+			perror("shm_open");
+		}
+		exit(1);
+	}
+	
     ftruncate(shm_fd, sizeof(Juego));
     juego = mmap(NULL, sizeof(Juego), PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
     juego->partida_en_curso = 0;
@@ -193,23 +260,16 @@ void servidor() {
             printf("Partida finalizada con %s\n", juego->nickname);
         } else {
             juego->juego_terminado = 1;
-            if (ranking_count > 0) {
-                printf("\nRanking final:\n");
-                for (int i = 0; i < ranking_count; i++) {
-                    printf("%s - %.2f segundos\n", ranking[i].nickname, ranking[i].tiempo);
-                }
-            } else {
-                printf("\nNingun participante logro acertar la frase\n");
-            }
+			
+            mostrar_ranking_final();
+			
             printf("Finalizando servidor \n");
+			limpiar_recursos();
             exit(0);
         } 
     }
 }
 
-void mostrar_ayuda() {
-    printf("Uso: ./servidor -a ARCHIVO -c INTENTOS\n");
-}
 
 int main(int argc, char *argv[]) {
     int opt;
@@ -239,8 +299,7 @@ int main(int argc, char *argv[]) {
             case 'h':
                 flag_h = 1;
                 break;
-            default:
-                mostrar_ayuda();
+            default:             
                 return 1;
         }
     }
@@ -257,21 +316,11 @@ int main(int argc, char *argv[]) {
 
     if (!flag_a || !flag_c) {
         fprintf(stderr, "Faltan opciones obligatorias -a y/o -c\n");
-        mostrar_ayuda();
         return 1;
     }
 
-    /*while ((opt = getopt(argc, argv, "a:c:h")) != -1) {
-        switch (opt) {
-            case 'a': strncpy(archivo_frases, optarg, MAX_LEN); break;
-            case 'c': intentos_por_partida = atoi(optarg); break;
-            case 'h': mostrar_ayuda(); exit(0);
-            default: mostrar_ayuda(); exit(1);
-        }
-    }*/
 
     if (!archivo_frases[0] || intentos_por_partida <= 0) {
-        mostrar_ayuda();
         return 1;
     }
 

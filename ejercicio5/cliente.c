@@ -1,3 +1,21 @@
+/*------------------------------------------------------------
+# APL2.
+# Materia: Virtualizacion de hardware
+# Ingeniería en Informática
+# Universidad Nacional de La Matanza (UNLaM)
+# Año: 2025
+#
+# Integrantes del grupo:
+# - De Luca, Leonel Maximiliano DNI: 42.588.356
+# - La Giglia, Rodrigo Ariel DNI: 33334248
+# - Marco, Nicolás Agustín DNI: 40885841
+# - Marrone, Micaela Abril DNI: 45683584
+#-------------------------------------------------------------
+*/
+
+
+
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,6 +38,11 @@ void sigint_handler(int sig) {
 
 void mostrar_ayuda() {
     printf("Uso: ./cliente -n NICKNAME -p PUERTO -s SERVIDOR\n");
+    printf("Parámetros obligatorios:\n");
+    printf("  -n, --nickname   Nombre de usuario (nickname) para identificar al jugador.\n");
+    printf("  -p, --puerto     Puerto del servidor al que se conectará el cliente.\n");
+    printf("  -s, --servidor   Dirección IP o nombre del servidor.\n");
+    printf("  -h, --help       Muestra esta ayuda.\n");
 }
 
 int main(int argc, char *argv[]) {
@@ -42,12 +65,12 @@ int main(int argc, char *argv[]) {
             case 'p': puerto = atoi(optarg); flag_p = 1; break;
             case 's': strncpy(servidor_ip, optarg, sizeof(servidor_ip)); flag_s = 1; break;
             case 'h': mostrar_ayuda(); return 0;
-            default: mostrar_ayuda(); return 1;
+            default: fprintf(stderr, "Error: parametros incorrectos.\n"); return 1;
         }
     }
 
     if (!flag_n || !flag_p || !flag_s) {
-        mostrar_ayuda();
+        fprintf(stderr, "Faltan opciones obligatorias -n <nickname> -p <puerto> -s <servidor_ip/nombre_servidor>.\n");
         return 1;
     }
 
@@ -55,26 +78,36 @@ int main(int argc, char *argv[]) {
 
     sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sockfd < 0) {
-        perror("socket");
+        perror("Error: No se pudo crear la conexión de red.\n");
         return 1;
     }
 
     struct sockaddr_in server_addr;
     server_addr.sin_family = AF_INET;
     server_addr.sin_port = htons(puerto);
-    if (inet_pton(AF_INET, servidor_ip, &server_addr.sin_addr) <= 0) {
-        perror("inet_pton");
-        return 1;
-    }
+    
+	// Primero intentamos inet_pton (para ver si es una IP numérica)
+	if (inet_pton(AF_INET, servidor_ip, &server_addr.sin_addr) <= 0) {
+    // Si falla, intentamos con gethostbyname()
+		struct hostent *he = gethostbyname(servidor_ip);
+		if (he == NULL) {
+			perror("Error: No se pudo resolver la dirección del servidor.\n");
+			return 1;
+		}
+		// Copiamos la dirección resuelta al sockaddr_in
+		memcpy(&server_addr.sin_addr, he->h_addr_list[0], he->h_length);
+	}
+	
+	
 
     if (connect(sockfd, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
-        perror("connect");
+        perror("Error: No se pudo conectar con el servidor.\n");
         return 1;
     }
 
     // Enviar nickname
     if (send(sockfd, nickname, strlen(nickname), 0) <= 0) {
-        perror("send nickname");
+        perror("Error: No se pudo enviar el nombre de usuario al servidor.\n");
         close(sockfd);
         return 1;
     }
